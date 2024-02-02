@@ -12,3 +12,5 @@ log = "0.4"
 wgpu = "0.18"
 pollster = "0.3"
 bytemuck = { version = "1.12", features = [ "derive" ] }
+include-wgsl-oil = "0.2.4"
+cgmath = "0.18"
