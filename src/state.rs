@@ -1,11 +1,8 @@
 use wgpu::util::DeviceExt;
-use winit::{
-    event::WindowEvent,
-    window::Window,
-};
+use winit::{event::WindowEvent, window::Window};
 
 #[include_wgsl_oil::include_wgsl_oil("../shaders/shader.wgsl")]
-pub mod sdf_shader { }
+pub mod sdf_shader {}
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -14,8 +11,7 @@ struct Vertex {
 }
 
 impl Vertex {
-    const ATTRIBS: [wgpu::VertexAttribute; 1] =
-        wgpu::vertex_attr_array![0 => Float32x2];
+    const ATTRIBS: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![0 => Float32x2];
 
     fn desc() -> wgpu::VertexBufferLayout<'static> {
         use std::mem;
@@ -29,16 +25,35 @@ impl Vertex {
 }
 
 const VERTICES: &[Vertex] = &[
-    Vertex { position: [-1.0, 1.0] },
-    Vertex { position: [-1.0, -1.0] },
-    Vertex { position: [1.0, -1.0] },
-    Vertex { position: [1.0, 1.0] },
+    Vertex {
+        position: [-1.0, 1.0],
+    },
+    Vertex {
+        position: [-1.0, -1.0],
+    },
+    Vertex {
+        position: [1.0, -1.0],
+    },
+    Vertex {
+        position: [1.0, 1.0],
+    },
 ];
 
-const INDICES: &[u16] = &[
-    0, 1, 2,
-    0, 2, 3,
-];
+const INDICES: &[u16] = &[0, 1, 2, 0, 2, 3];
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct ScreenUniform {
+    width: u32,
+    height: u32,
+}
+
+impl ScreenUniform {
+    pub fn on_resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
+        self.width = new_size.width;
+        self.height = new_size.height;
+    }
+}
 
 pub struct State {
     surface: wgpu::Surface,
@@ -49,6 +64,11 @@ pub struct State {
     render_pipeline: wgpu::RenderPipeline,
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
+
+    screen_uniform: ScreenUniform,
+    screen_buffer: wgpu::Buffer,
+    screen_bind_group: wgpu::BindGroup,
+
     window: Window,
 }
 
@@ -105,13 +125,45 @@ impl State {
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Shader"),
-            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(sdf_shader::SOURCE))
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(sdf_shader::SOURCE)),
+        });
+
+        let screen_uniform = ScreenUniform {
+            width: size.width,
+            height: size.height,
+        };
+        let screen_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Screen Buffer"),
+            contents: bytemuck::cast_slice(&[screen_uniform]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let screen_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+                label: Some("Screen bind group layout"),
+            });
+        let screen_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &screen_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: screen_buffer.as_entire_binding(),
+            }],
+            label: Some("Screen bind group"),
         });
 
         let render_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Render Pipeline Layout"),
-                bind_group_layouts: &[],
+                bind_group_layouts: &[&screen_bind_group_layout],
                 push_constant_ranges: &[],
             });
         let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -146,23 +198,19 @@ impl State {
                 mask: !0,
                 alpha_to_coverage_enabled: false,
             },
-            multiview: None,    
+            multiview: None,
         });
 
-        let vertex_buffer = device.create_buffer_init(
-            &wgpu::util::BufferInitDescriptor {
-                label: Some("Vertex Buffer"),
-                contents: bytemuck::cast_slice(VERTICES),
-                usage: wgpu::BufferUsages::VERTEX,
-            }
-        );
-        let index_buffer = device.create_buffer_init(
-            &wgpu::util::BufferInitDescriptor {
-                label: Some("Index Buffer"),
-                contents: bytemuck::cast_slice(INDICES),
-                usage: wgpu::BufferUsages::INDEX,
-            }
-        );
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Vertex Buffer"),
+            contents: bytemuck::cast_slice(VERTICES),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Index Buffer"),
+            contents: bytemuck::cast_slice(INDICES),
+            usage: wgpu::BufferUsages::INDEX,
+        });
 
         Self {
             window,
@@ -174,6 +222,9 @@ impl State {
             render_pipeline,
             vertex_buffer,
             index_buffer,
+            screen_uniform,
+            screen_buffer,
+            screen_bind_group,
         }
     }
 
@@ -191,6 +242,7 @@ impl State {
             self.config.width = new_size.width;
             self.config.height = new_size.height;
             self.surface.configure(&self.device, &self.config);
+            self.screen_uniform.on_resize(new_size);
         }
     }
 
@@ -198,7 +250,13 @@ impl State {
         false
     }
 
-    pub fn update(&mut self) {}
+    pub fn update(&mut self) {
+        self.queue.write_buffer(
+            &self.screen_buffer,
+            0,
+            bytemuck::cast_slice(&[self.screen_uniform]),
+        );
+    }
 
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
         let output = self.surface.get_current_texture()?;
@@ -232,6 +290,7 @@ impl State {
             });
 
             render_pass.set_pipeline(&self.render_pipeline);
+            render_pass.set_bind_group(0, &self.screen_bind_group, &[]);
             render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
             render_pass.draw_indexed(0..(INDICES.len() as u32), 0, 0..1);
