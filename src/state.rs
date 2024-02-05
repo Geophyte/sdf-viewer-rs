@@ -1,6 +1,8 @@
 use wgpu::util::DeviceExt;
 use winit::{event::WindowEvent, window::Window};
 
+use crate::camera::Camera;
+
 #[include_wgsl_oil::include_wgsl_oil("../shaders/shader.wgsl")]
 pub mod sdf_shader {}
 
@@ -49,9 +51,23 @@ struct ScreenUniform {
 }
 
 impl ScreenUniform {
-    pub fn on_resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
+    fn on_resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
         self.width = new_size.width;
         self.height = new_size.height;
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct CameraUniform {
+    position: [f32; 4],
+    rotation: [[f32; 4]; 4],
+}
+
+impl CameraUniform {
+    fn on_update(&mut self, camera: &Camera) {
+        self.position = camera.position();
+        self.rotation = camera.get_rotation_matrix();
     }
 }
 
@@ -68,6 +84,11 @@ pub struct State {
     screen_uniform: ScreenUniform,
     screen_buffer: wgpu::Buffer,
     screen_bind_group: wgpu::BindGroup,
+
+    camera: Camera,
+    camera_uniform: CameraUniform,
+    camera_buffer: wgpu::Buffer,
+    camera_bind_group: wgpu::BindGroup,
 
     window: Window,
 }
@@ -160,10 +181,43 @@ impl State {
             label: Some("Screen bind group"),
         });
 
+        let camera = Camera::new();
+        let camera_uniform = CameraUniform {
+            position: camera.position(),
+            rotation: camera.get_rotation_matrix()
+        };
+        let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Camera Buffer"),
+            contents: bytemuck::cast_slice(&[camera_uniform]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let camera_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+                label: Some("Camera bind group layout"),
+            });
+        let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &camera_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: camera_buffer.as_entire_binding(),
+            }],
+            label: Some("Camera bind group"),
+        });
+
         let render_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Render Pipeline Layout"),
-                bind_group_layouts: &[&screen_bind_group_layout],
+                bind_group_layouts: &[&screen_bind_group_layout, &camera_bind_group_layout],
                 push_constant_ranges: &[],
             });
         let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -225,6 +279,10 @@ impl State {
             screen_uniform,
             screen_buffer,
             screen_bind_group,
+            camera,
+            camera_uniform,
+            camera_buffer,
+            camera_bind_group,
         }
     }
 
@@ -247,7 +305,8 @@ impl State {
     }
 
     pub fn input(&mut self, event: &WindowEvent) -> bool {
-        false
+        self.camera.process_input(event);
+        return false;
     }
 
     pub fn update(&mut self) {
@@ -255,6 +314,13 @@ impl State {
             &self.screen_buffer,
             0,
             bytemuck::cast_slice(&[self.screen_uniform]),
+        );
+
+        self.camera_uniform.on_update(&self.camera);
+        self.queue.write_buffer(
+            &self.camera_buffer,
+            0,
+            bytemuck::cast_slice(&[self.camera_uniform]),
         );
     }
 
@@ -291,6 +357,7 @@ impl State {
 
             render_pass.set_pipeline(&self.render_pipeline);
             render_pass.set_bind_group(0, &self.screen_bind_group, &[]);
+            render_pass.set_bind_group(1, &self.camera_bind_group, &[]);
             render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
             render_pass.draw_indexed(0..(INDICES.len() as u32), 0, 0..1);
